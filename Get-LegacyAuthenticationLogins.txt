@@ -1,20 +1,24 @@
 #complain to: Mac Edwards
 
 param (
-
-    $ApplicationID = "dcc6e819-66db-4a99-a2b1-1c3ca1b605c3",
-    $TenantDomainName = "myunt.onmicrosoft.com",
+    [Parameter(Mandatory=$true)]
+    $ApplicationID,
+    [Parameter(Mandatory=$true)]
+    $TenantDomainName,
     [Parameter(Mandatory=$true)]
     $AccessSecret,
     $SPOUsername,
     $SPOPassword,
-    $UploadUrl = 'https://myunt.sharepoint.com/sites/ECSLeads',
+    $UploadUrl =,
     $DaysBack = 7,
-    $UploadtoSPO = "yes"
+    $UploadtoSPO,
+    $UploadFilePath 
  )
 
 Import-Module -Name ActiveDirectory,ImportExcel,PnP.PowerShell
-$SPOCredentials = New-Object -TypeName PSCredential -ArgumentList $SPOUsername,(ConvertTo-SecureString -String $SPOPassword -AsPlainText -Force)
+if($SPOUsername -and $SPOPassword){
+    $SPOCredentials = New-Object -TypeName PSCredential -ArgumentList $SPOUsername,(ConvertTo-SecureString -String $SPOPassword -AsPlainText -Force)
+   }
 $jobstarttime = get-date
 
 function Connect-Graph {
@@ -120,12 +124,11 @@ Function Get-LegacyAuthSignins {
                              Write-Host  " has 'Report Reader' role rights." -ForegroundColor Yellow
                              break 
                             }
-                           
                 }
             } 
             else {
                 Write-host "Could not fetch the token.. breaking.."         
-                Write-Host "Script faile due the following exception" -ForegroundColor Yellow
+                Write-Host "Script failed due the following exception" -ForegroundColor Yellow
                 $authResult.Exception.InnerException.Message
                 ;break
             }
@@ -205,116 +208,6 @@ Function Get-LegacyAuthSignins {
 
    # $path = "D:\LegacyAuth\LegacyAuthLogs-rawData"
 
-
-Function get-managedby{
-    
-    param(
-        [Parameter(Mandatory=$true)]
-        $dn,
-        [Parameter(Mandatory=$true)]
-        $dc
-    )
-     $iterationcount = 0
-     $iteration_limit = 6
-     $supportchain = New-Object System.Collections.ArrayList
-     $ManagedBYObject_results = [pscustomobject]@{
-    
-         Distinguishedname = $dn
-         DC = $dc
-         OUManagerEmail=$null;
-         SupportChain = $null;
-         OUSupportLevel = $null;
-         UserManagerEmail=$null;
-         Error=$null
-    }
-
-    Try{
-        
-        $aduser = Get-ADobject -Identity $dn -Server $dc -Properties manager -ErrorAction Stop
-
-   } Catch {
-        
-        $ManagedBYObject_results.error = "$($Error[0])"
-        $ManagedBYObject_results
-        Return
-        
-    }
-   Write-Verbose "Find Manager"
-
-   if(!([string]::IsNullOrWhiteSpace($aduser.manager))){
-
-            $adusermanager = $ADuser.Manager.Split("=").split(",")[1]
-            
-            Try{
-
-                $cnManagerEmail = (get-adobject -server $dc -Identity $($aduser.manager)  -Properties mail).mail
-                
-                }
-
-            Catch{
-
-                $cnManagerEmail = "None"
-                
-                }
-           
-   }else{
-
-    $cnManagerEmail = "Blank"
-
-   }
-
-   $ManagedBYObject_results.usermanageremail = $cnManagerEmail
-
-   $orgUnitDN = $ADuser.distinguishedname
-
-    While([string]::IsNullorWhiteSpace($ouManagerEmail)){
-        if($iterationcount -gt $iteration_limit){
-            Write-Verbose "Too many iterations, breaking loop"
-            $ManagedBYObject_results.Error = "Iteration Limit of $iteration_limit Reached"
-            break
-            }
-
-        $dnsplit = $orgUnitDN.split(",")
-        $replaceval = [regex]"$($dnsplit[0]),"
-        $orgUnitDN = $replaceval.Replace("$orgUnitDN","","1")
-
-        if($orgUnitDN -like "DC*"){
-
-            Write-Verbose "No Manager Found in tree, break"
-            break
-        }
-        Try{
-
-            $orgUnit = ((Get-ADOrganizationalUnit -Server $dc -Identity $orgUnitDN -Properties ManagedBy))
-        }Catch {
-
-            Write-Error "Could not find org unit for $orgUnitDN, user is $aduser"
-
-        }
-
-        $OUManagedBY = $orgUnit.managedby
-
-        if(!([string]::IsNullOrWhiteSpace($OUManagedBY))){
-            #write-host "$OUManagedBY"
-
-            $supportchain.Add($OUManagedBY) | Out-Null
-                
-            $ouManagerEmail = (Get-ADobject -Server $dc -identity $OUManagedBY -Properties mail).mail
-
-            $ManagedBYObject_results.OuManagerEmail = $ouManagerEmail
-                    
-        }
-
-    $iterationcount++
-
-    }#endwhile
-
-$ManagedBYObject_results.supportchain = $supportchain
-$ManagedBYObject_results.OUsupportLevel = $orgUnitDN
-
-$ManagedBYObject_results
-
-}
 Write-host "Getting Legacy Signins for $DaysBack, this could take a while"
 $Output = Get-LegacyAuthSignins -applicationID $ApplicationID -AccessSecret $AccessSecret -daysBack $DaysBack
 Write-host "Legacy Authentication Count: $($output.count)"
@@ -326,7 +219,6 @@ $UniqueEntries = $group | ForEach-Object {
     $progressCount ++
     if(!($progressCount%100)){Write-host "Processing $progressCount of $($group.count)"}
     $upn = $_.name
-    $dn = get-aduser -Filter {userprincipalname -like $upn} -Server ($Env:USERDNSDOMAIN + ":3268") -Properties edupersonscopedaffiliation, canonicalname, distinguishedname
     $legacyUserObject = [pscustomobject]@{
         userPrincipalName = $_.name
         appDisplayName = ($_.group.appDisplayName | sort-object -Unique ) -join ";"
@@ -336,90 +228,43 @@ $UniqueEntries = $group | ForEach-Object {
         browser = ($_.group.browser |sort-object -Unique ) -join ";"
         ipAddress =  ($_.group.ipAddress | sort-object -Unique  ) -join ";"
         MostRecentLegacyAuth = ($_.group.createdDateTime  | sort-object -Descending | select-object -First 1) 
-        Managedby = if($upn -like "*@my.*.edu"){"student"}elseif($dn){(get-managedby -dn $dn.DistinguishedName -dc ($Env:USERDNSDOMAIN + ":3268")).OUManagerEmail}else{$null}
-        SupportOU = if($dn.CanonicalName -like "*students.ad.unt.edu*"){"students.ad.unt.edu"}else{($dn.canonicalname -split "/")[2]}
-        Name = $dn.GivenName + " " + $dn.Surname
     }
 
     $legacyUserObject
 
 }
+
+    
+    $FileDateRange = (get-date ((get-date).AddDays(-$daysBack)) -Format "MM_dd_yyyy") + "-" + (get-date -Format "MM_dd_yyyy")
+
+    $foldername = "LegacyAuth-" + $FileDateRange
+    $OutputFile = ".\LegAuth_" + $FileDateRange + ".xlsx"
+
+    $UniqueEntries | Export-Excel -Path $OutputFile
+    $Output | export-csv -Path $RAWOutputFile -NoTypeInformation
+    
 if($UploadtoSPO -like "Yes"){
-Write-host "Connecting to $UploadUrl"
-Connect-PnPOnline -Url $UploadUrl -Credentials $SPOCredentials
+    Write-host "Connecting to $UploadUrl"
+    Connect-PnPOnline -Url $UploadUrl -Credentials $SPOCredentials
 
-$UploadFilePath = "/sites/ECSLeads/Shared Documents/Identity Management/Legacy Auth/Legacy Auth Logs Shared to ITPros"
+    $RAWOutputFile = ".\LegAuth_RAW_" + $FileDateRange + ".csv"
+    Write-host "Creating Folder : $foldername"
+    Add-PNPfolder -Name $foldername -Folder $UploadFilePath 
 
-$FileDateRange = (get-date ((get-date).AddDays(-$daysBack)) -Format "MM_dd_yyyy") + "-" + (get-date -Format "MM_dd_yyyy")
+    Write-host "Uploading files $OutputFile and $RAWOutputFile"
 
-$foldername = "LegacyAuth-" + $FileDateRange
-$OutputFile = ".\LegAuth_" + $FileDateRange + ".xlsx"
-$RAWOutputFile = ".\LegAuth_RAW_" + $FileDateRange + ".csv"
+    Add-PnPFile -Folder ($UploadFilePath + "/" + $foldername)  -Path $OutputFile 
+    Add-PNPFile -Folder ($UploadFilePath + "/" + $foldername) -Path $RAWOutputFile
 
-$UniqueEntries | Export-Excel -Path $OutputFile
-$Output | export-csv -Path $RAWOutputFile -NoTypeInformation
+    Write-host "Deleting local files"
+    Remove-Item -Path $OutputFile -Verbose
+    Remove-Item -Path $RAWOutputFile -Verbose
 
-Write-host "Creating Folder : $foldername"
-Add-PNPfolder -Name $foldername -Folder $UploadFilePath 
+    Disconnect-PnPOnline
+    } else {
+        Write-host "Not uploading to SPO"
 
-Write-host "Uploading files $OutputFile and $RAWOutputFile"
-
-Add-PnPFile -Folder ($UploadFilePath + "/" + $foldername)  -Path $OutputFile 
-Add-PNPFile -Folder ($UploadFilePath + "/" + $foldername) -Path $RAWOutputFile
-
-Write-host "Deleting local files"
-Remove-Item -Path $OutputFile -Verbose
-Remove-Item -Path $RAWOutputFile -Verbose
-
-Disconnect-PnPOnline
-} else {
-    Write-host "Not uploading to SPO"
-
-}
-#Send Student Emails
-<#
-$UniqueEntries | foreach-object {
-
-    if($_.userprincipalname -like "*@my.UNT*.edu"){
-
-        $recipientdisplayname = $_.Name
-        $useragent = $_.useragent -replace "\(.+\)"
-        $DeviceInformation = $useragent -split ";" | ForEach-Object {
-
-            "<li>"+ $_ + "</li>"
-
-        }
-
-        $OS = $_.operatingSystem -split ";" | where {![string]::IsNullOrEmpty($_)} | ForEach-Object {
-
-            "<li>"+ $_ + "</li>"
-
-        }
-        $lastlogondate = get-date($_.MostRecentLegacyAuth) -Format "MM/dd/yyyy"
-
-        $emailmessage = get-content .\LegacyAuthNotificationTemplate.html
-        
-        $emailmessage = $ExecutionContext.InvokeCommand.ExpandString($emailmessage)
-
-        $emailSplat = @{
-            To = "$($_.userprincipalname)"
-            From = "ECS.Communications@unt.edu"
-            Subject = "Student Email Account update needed"
-            Body = $emailmessage
-            Port = 25
-            SMTPServer = "mailhost.unt.edu"
-            UseSSL = $True
-            BodyAsHTML = $True   
-   
-        }
-
-        Send-MailMessage @emailSplat
-
-        write-host "Message sent to $($_.userprincipalname)"
     }
-
-}
-#>
 
 
 $jobendtime = get-date
