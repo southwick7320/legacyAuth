@@ -237,9 +237,9 @@ $UniqueEntries = $group | ForEach-Object {
     
     $FileDateRange = (get-date ((get-date).AddDays(-$daysBack)) -Format "MM_dd_yyyy") + "-" + (get-date -Format "MM_dd_yyyy")
 
-    $foldername = "LegacyAuth-" + $FileDateRange
-    $OutputFile = ".\LegAuth_" + $FileDateRange + ".xlsx"
 
+    $OutputFile = ".\LegAuth_" + $FileDateRange + ".xlsx"
+    $RAWOutputFile = ".\LegAuth_RAW_" + $FileDateRange + ".csv"
     $UniqueEntries | Export-Excel -Path $OutputFile
     $Output | export-csv -Path $RAWOutputFile -NoTypeInformation
     
@@ -247,7 +247,7 @@ if($UploadtoSPO -like "Yes"){
     Write-host "Connecting to $UploadUrl"
     Connect-PnPOnline -Url $UploadUrl -Credentials $SPOCredentials
 
-    $RAWOutputFile = ".\LegAuth_RAW_" + $FileDateRange + ".csv"
+    $foldername = "LegacyAuth-" + $FileDateRange
     Write-host "Creating Folder : $foldername"
     Add-PNPfolder -Name $foldername -Folder $UploadFilePath 
 
