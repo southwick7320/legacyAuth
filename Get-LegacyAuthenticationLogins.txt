@@ -1,0 +1,428 @@
+#complain to: Mac Edwards
+
+param (
+
+    $ApplicationID = "dcc6e819-66db-4a99-a2b1-1c3ca1b605c3",
+    $TenantDomainName = "myunt.onmicrosoft.com",
+    [Parameter(Mandatory=$true)]
+    $AccessSecret,
+    $SPOUsername,
+    $SPOPassword,
+    $UploadUrl = 'https://myunt.sharepoint.com/sites/ECSLeads',
+    $DaysBack = 7,
+    $UploadtoSPO = "yes"
+ )
+
+Import-Module -Name ActiveDirectory,ImportExcel,PnP.PowerShell
+$SPOCredentials = New-Object -TypeName PSCredential -ArgumentList $SPOUsername,(ConvertTo-SecureString -String $SPOPassword -AsPlainText -Force)
+$jobstarttime = get-date
+
+function Connect-Graph {
+    param(
+        $ApplicationID, 
+        $TenantDomainName,
+        $AccessSecret
+    )
+    
+    $Body = @{    
+        Grant_Type    = "client_credentials"
+        Scope         = "https://graph.microsoft.com/.default"
+        client_Id     = $ApplicationID
+        Client_Secret = $AccessSecret
+    } 
+    
+    $ConnectGraph = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantDomainName/oauth2/v2.0/token" `
+    -Method POST -Body $Body
+    
+    $ConnectGraph
+
+}
+
+Write-Host "
+LEGACY AUTHENTICATION CLIENTS
+
+      [1] - AutoDiscover
+      [2] - Exchange ActiveSync
+      [3] - Exchange Online PowerShell      
+      [4] - Exchange Web Services      
+      [5] - IMAP4
+      [6] - MAPI Over HTTP
+      [7] - Offline Address Book
+      [8] - Other clients
+      [9] - Outlook Anywhere (RPC over HTTP)
+      [10]- POP3      
+      [11]- Reporting Web Services
+      [12]- Authenticated SMTP 
+      "
+Write-Host "
+----------------------------------------------------------------"
+Function Get-LegacyAuthSignins {
+    param(
+    
+        $applicationID,
+        $AccessSecret,
+        $daysBack
+    )
+    #credit to "www.lab365.in"
+    
+    $authtype = "AutoDiscover","Exchange ActiveSync","Exchange Online PowerShell","Exchange Web Services","IMAP4","MAPI Over HTTP","Offline Address Book","Other clients","Outlook Anywhere (RPC over HTTP)","POP3","Reporting Web Services"
+    
+    $folderpath = "D:\LegacyAuth\LegacyAuthLogs-$(get-date -Format MM_dd_yyyy)"
+    
+    $Output = @()
+    foreach($dayback in 1..$daysback){
+
+        foreach($app in $authtype){
+            #$dayback = 5
+            $clientapp = "all"
+            $startdate = get-date (Get-Date -Hour 00 -Minute 00 -Second 01).AddDays(-$dayback) -Format yyyy-MM-dd
+            $enddate = get-date (Get-Date -Hour 11 -Minute 59 -Second 59).AddDays(-($dayback-1)) -Format yyyy-MM-dd
+    
+            $ConnectGraph = Connect-Graph -ApplicationID $applicationID -TenantDomainName $TenantDomainName -AccessSecret $AccessSecret
+            $ExpirationTime =  (get-date).AddSeconds(($ConnectGraph.expires_in))
+            $accesstoken = $ConnectGraph.access_token
+        
+            Write-Host "Sign-in Logs starting from $startdate to $enddate will be searched" -ForegroundColor Cyan
+
+            $resultcount = 0
+        
+            if ($accesstoken)  { 
+                Write-Host "Fetching the signin logs for $app" -ForegroundColor cyan
+                $Clientappq="clientAppUsed eq " + "'"  +  $app + "'"
+                $date = " and createdDateTime ge " + $startdate +  " and createdDateTime le  " + $enddate # 'YYYY-MM-DD'
+                $quaryFilter=$Clientappq + $date    # + $status
+                $apiUrl='https://graph.microsoft.com/beta/auditLogs/signIns?' + "`$filter=$quaryFilter"
+                
+                TRY   {
+                    $Data=Invoke-RestMethod -Headers @{Authorization = "Bearer $accessToken"} -Uri $apiUrl -Method Get
+                    if ($data.value){
+                                    $output += $data.value | select createdDateTime,userPrincipalName,appDisplayName,clientAppUsed,userAgent,conditionalAccessStatus,
+                                    @{N="operatingSystem";E={$_.deviceDetail.operatingSystem}},
+                                    @{N="browser";E={$_.deviceDetail.browser}},ipAddress,authenticationRequirement,
+                                    @{N="Status";E={$_.Status.errorCode}},
+                                    @{N="additionalDetails";E={$_.Status.additionalDetails}},
+                                    @{N="failureReason";E={$_.Status.failureReason}}# |`
+                                    #export-csv $exportFileName -NoTypeInformation -Append 
+                                   }
+                    $resultcount += $data.value.count
+        
+                } CATCH {               
+                       Write-Host "Failed to fetch the Sign-in logs, please review the error message below." -ForegroundColor Yellow
+                      
+                       if (($error[0].ErrorDetails.message | ConvertFrom-Json).error.message -match "expired")
+                            {
+                             Write-Host "Token in psSession has expired,script will try renew the token please restart the script" -ForegroundColor Yellow
+                             $Global:authResult=GetAuthorizationToken
+                            } 
+                       else {
+                             Write-Host "Please make sure the account " -NoNewline -ForegroundColor Yellow
+                             Write-Host  $Office365Username -NoNewline -ForegroundColor Cyan
+                             Write-Host  " has 'Report Reader' role rights." -ForegroundColor Yellow
+                             break 
+                            }
+                           
+                }
+            } 
+            else {
+                Write-host "Could not fetch the token.. breaking.."         
+                Write-Host "Script faile due the following exception" -ForegroundColor Yellow
+                $authResult.Exception.InnerException.Message
+                ;break
+            }
+        
+            #go in loop if more than 1000 Logs were found.
+            if ($data."@odata.nextLink" -ne $null) {
+                do {
+                    #check the current auth token status.                
+                    $MinToExpire=($ExpirationTime - (get-date)).minutes
+                    Write-Host "AuthToken Age $MinToExpire Min " -NoNewline 
+                    if($MinToExpire -lt 5) {
+                        Write-host "renewing token"
+                        $Global:authResult = Connect-Graph -ApplicationID $applicationID -TenantDomainName $TenantDomainName -AccessSecret $AccessSecret
+                        $accessToken=$authResult.access_token
+                        $ExpirationTime = (get-date).AddSeconds(($authResult.expires_in))
+                    }
+        
+                    #Fetch the next Odata Link
+                
+                    $apiUrl=$data."@odata.nextLink"
+                    Write-host "Log Processed so far:" $resultcount  -ForegroundColor Cyan   
+                    Try{           
+                        $Data=Invoke-RestMethod -Headers @{Authorization = "Bearer $accessToken"} -Uri $apiUrl -Method Get
+                    } Catch {
+                          
+                        if(($Error[0].exception | Out-String) -like "The remote server returned an error: (429)*"){
+                            Write-host "Error 429 returned, please wait 30 seconds"
+                            Start-Sleep -Seconds 30
+                            $apiURL = $apiURL
+        
+                        }elseif (($Error[0].exception | Out-String) -like "The remote server returned an error: (504) Gateway Timeout*"){
+        
+                            Write-host "Error 504 returned, please wait 2 minutes"
+                            Start-Sleep -Seconds 120
+                            $apiURL = $apiURL
+        
+                        } else {
+        
+                            $Error[0].exception
+        
+                        }
+        
+                    }
+                        
+                        #Export to csv
+                    if ($data.value) 
+                            {                           
+                             $output += $data.value | select createdDateTime,userPrincipalName,appDisplayName,clientAppUsed,userAgent,conditionalAccessStatus,
+                             @{N="operatingSystem";E={$_.deviceDetail.operatingSystem}},
+                             @{N="browser";E={$_.deviceDetail.browser}},ipAddress,authenticationRequirement,
+                             @{N="Status";E={$_.Status.errorCode}},
+                             @{N="additionalDetails";E={$_.Status.additionalDetails}},
+                             @{N="failureReason";E={$_.Status.failureReason}}# | `
+                              $resultcount += $data.value.count
+                    }                  
+                } until ($data."@odata.nextLink" -eq $null)
+                        
+  
+            }
+            else { 
+              #Notification for less than 1K logs 
+                if ($data){
+                    #Write-Host "Sign-in Logs Export completed"
+                    #Write-Host "logs has has been exported to path" $(($(Get-Location).path) + "\" + "$exportFileName") -f Green
+                }
+            } 
+
+        }
+    
+        Write-host "sleeping overnight..."
+        Start-Sleep -Seconds 10
+    
+    }
+
+    $output
+}
+
+   # $path = "D:\LegacyAuth\LegacyAuthLogs-rawData"
+
+
+Function get-managedby{
+    
+    param(
+        [Parameter(Mandatory=$true)]
+        $dn,
+        [Parameter(Mandatory=$true)]
+        $dc
+    )
+     $iterationcount = 0
+     $iteration_limit = 6
+     $supportchain = New-Object System.Collections.ArrayList
+     $ManagedBYObject_results = [pscustomobject]@{
+    
+         Distinguishedname = $dn
+         DC = $dc
+         OUManagerEmail=$null;
+         SupportChain = $null;
+         OUSupportLevel = $null;
+         UserManagerEmail=$null;
+         Error=$null
+    }
+
+    Try{
+        
+        $aduser = Get-ADobject -Identity $dn -Server $dc -Properties manager -ErrorAction Stop
+
+   } Catch {
+        
+        $ManagedBYObject_results.error = "$($Error[0])"
+        $ManagedBYObject_results
+        Return
+        
+    }
+   Write-Verbose "Find Manager"
+
+   if(!([string]::IsNullOrWhiteSpace($aduser.manager))){
+
+            $adusermanager = $ADuser.Manager.Split("=").split(",")[1]
+            
+            Try{
+
+                $cnManagerEmail = (get-adobject -server $dc -Identity $($aduser.manager)  -Properties mail).mail
+                
+                }
+
+            Catch{
+
+                $cnManagerEmail = "None"
+                
+                }
+           
+   }else{
+
+    $cnManagerEmail = "Blank"
+
+   }
+
+   $ManagedBYObject_results.usermanageremail = $cnManagerEmail
+
+   $orgUnitDN = $ADuser.distinguishedname
+
+    While([string]::IsNullorWhiteSpace($ouManagerEmail)){
+        if($iterationcount -gt $iteration_limit){
+            Write-Verbose "Too many iterations, breaking loop"
+            $ManagedBYObject_results.Error = "Iteration Limit of $iteration_limit Reached"
+            break
+            }
+
+        $dnsplit = $orgUnitDN.split(",")
+        $replaceval = [regex]"$($dnsplit[0]),"
+        $orgUnitDN = $replaceval.Replace("$orgUnitDN","","1")
+
+        if($orgUnitDN -like "DC*"){
+
+            Write-Verbose "No Manager Found in tree, break"
+            break
+        }
+        Try{
+
+            $orgUnit = ((Get-ADOrganizationalUnit -Server $dc -Identity $orgUnitDN -Properties ManagedBy))
+        }Catch {
+
+            Write-Error "Could not find org unit for $orgUnitDN, user is $aduser"
+
+        }
+
+        $OUManagedBY = $orgUnit.managedby
+
+        if(!([string]::IsNullOrWhiteSpace($OUManagedBY))){
+            #write-host "$OUManagedBY"
+
+            $supportchain.Add($OUManagedBY) | Out-Null
+                
+            $ouManagerEmail = (Get-ADobject -Server $dc -identity $OUManagedBY -Properties mail).mail
+
+            $ManagedBYObject_results.OuManagerEmail = $ouManagerEmail
+                    
+        }
+
+    $iterationcount++
+
+    }#endwhile
+
+$ManagedBYObject_results.supportchain = $supportchain
+$ManagedBYObject_results.OUsupportLevel = $orgUnitDN
+
+$ManagedBYObject_results
+
+}
+Write-host "Getting Legacy Signins for $DaysBack, this could take a while"
+$Output = Get-LegacyAuthSignins -applicationID $ApplicationID -AccessSecret $AccessSecret -daysBack $DaysBack
+Write-host "Legacy Authentication Count: $($output.count)"
+$group = $Output | Group-Object userprincipalname
+
+$progressCount = 0
+
+$UniqueEntries = $group | ForEach-Object {
+    $progressCount ++
+    if(!($progressCount%100)){Write-host "Processing $progressCount of $($group.count)"}
+    $upn = $_.name
+    $dn = get-aduser -Filter {userprincipalname -like $upn} -Server ($Env:USERDNSDOMAIN + ":3268") -Properties edupersonscopedaffiliation, canonicalname, distinguishedname
+    $legacyUserObject = [pscustomobject]@{
+        userPrincipalName = $_.name
+        appDisplayName = ($_.group.appDisplayName | sort-object -Unique ) -join ";"
+        clientAppUsed = ($_.group.clientAppUsed | sort-object -Unique ) -join ";"
+        userAgent = ($_.group.userAgent | sort-object -Unique ) -join ";"
+        operatingSystem = ($_.group.operatingSystem| sort-object -Unique ) -join ";"
+        browser = ($_.group.browser |sort-object -Unique ) -join ";"
+        ipAddress =  ($_.group.ipAddress | sort-object -Unique  ) -join ";"
+        MostRecentLegacyAuth = ($_.group.createdDateTime  | sort-object -Descending | select-object -First 1) 
+        Managedby = if($upn -like "*@my.*.edu"){"student"}elseif($dn){(get-managedby -dn $dn.DistinguishedName -dc ($Env:USERDNSDOMAIN + ":3268")).OUManagerEmail}else{$null}
+        SupportOU = if($dn.CanonicalName -like "*students.ad.unt.edu*"){"students.ad.unt.edu"}else{($dn.canonicalname -split "/")[2]}
+        Name = $dn.GivenName + " " + $dn.Surname
+    }
+
+    $legacyUserObject
+
+}
+if($UploadtoSPO -like "Yes"){
+Write-host "Connecting to $UploadUrl"
+Connect-PnPOnline -Url $UploadUrl -Credentials $SPOCredentials
+
+$UploadFilePath = "/sites/ECSLeads/Shared Documents/Identity Management/Legacy Auth/Legacy Auth Logs Shared to ITPros"
+
+$FileDateRange = (get-date ((get-date).AddDays(-$daysBack)) -Format "MM_dd_yyyy") + "-" + (get-date -Format "MM_dd_yyyy")
+
+$foldername = "LegacyAuth-" + $FileDateRange
+$OutputFile = ".\LegAuth_" + $FileDateRange + ".xlsx"
+$RAWOutputFile = ".\LegAuth_RAW_" + $FileDateRange + ".csv"
+
+$UniqueEntries | Export-Excel -Path $OutputFile
+$Output | export-csv -Path $RAWOutputFile -NoTypeInformation
+
+Write-host "Creating Folder : $foldername"
+Add-PNPfolder -Name $foldername -Folder $UploadFilePath 
+
+Write-host "Uploading files $OutputFile and $RAWOutputFile"
+
+Add-PnPFile -Folder ($UploadFilePath + "/" + $foldername)  -Path $OutputFile 
+Add-PNPFile -Folder ($UploadFilePath + "/" + $foldername) -Path $RAWOutputFile
+
+Write-host "Deleting local files"
+Remove-Item -Path $OutputFile -Verbose
+Remove-Item -Path $RAWOutputFile -Verbose
+
+Disconnect-PnPOnline
+} else {
+    Write-host "Not uploading to SPO"
+
+}
+#Send Student Emails
+<#
+$UniqueEntries | foreach-object {
+
+    if($_.userprincipalname -like "*@my.UNT*.edu"){
+
+        $recipientdisplayname = $_.Name
+        $useragent = $_.useragent -replace "\(.+\)"
+        $DeviceInformation = $useragent -split ";" | ForEach-Object {
+
+            "<li>"+ $_ + "</li>"
+
+        }
+
+        $OS = $_.operatingSystem -split ";" | where {![string]::IsNullOrEmpty($_)} | ForEach-Object {
+
+            "<li>"+ $_ + "</li>"
+
+        }
+        $lastlogondate = get-date($_.MostRecentLegacyAuth) -Format "MM/dd/yyyy"
+
+        $emailmessage = get-content .\LegacyAuthNotificationTemplate.html
+        
+        $emailmessage = $ExecutionContext.InvokeCommand.ExpandString($emailmessage)
+
+        $emailSplat = @{
+            To = "$($_.userprincipalname)"
+            From = "ECS.Communications@unt.edu"
+            Subject = "Student Email Account update needed"
+            Body = $emailmessage
+            Port = 25
+            SMTPServer = "mailhost.unt.edu"
+            UseSSL = $True
+            BodyAsHTML = $True   
+   
+        }
+
+        Send-MailMessage @emailSplat
+
+        write-host "Message sent to $($_.userprincipalname)"
+    }
+
+}
+#>
+
+
+$jobendtime = get-date
+Write-host "Goodbye..."
+Write-host "Total run time..."
+$jobendtime - $jobstarttime
