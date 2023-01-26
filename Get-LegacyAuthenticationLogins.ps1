@@ -1,5 +1,7 @@
 #complain to: Mac Edwards
+#Requires -Modules ImportExcel
 
+#Install Excel Module Install-Module ImportExcel -Scope CurrentUser
 param (
     [Parameter(Mandatory=$true)]
     $ApplicationID,
@@ -15,10 +17,11 @@ param (
     $UploadFilePath 
  )
 
-Import-Module -Name ActiveDirectory,ImportExcel,PnP.PowerShell
+
 if($SPOUsername -and $SPOPassword){
+    Import-module PnP.PowerShell
     $SPOCredentials = New-Object -TypeName PSCredential -ArgumentList $SPOUsername,(ConvertTo-SecureString -String $SPOPassword -AsPlainText -Force)
-   }
+}
 $jobstarttime = get-date
 
 function Connect-Graph {
@@ -44,7 +47,6 @@ function Connect-Graph {
 
 Write-Host "
 LEGACY AUTHENTICATION CLIENTS
-
       [1] - AutoDiscover
       [2] - Exchange ActiveSync
       [3] - Exchange Online PowerShell      
@@ -63,24 +65,23 @@ Write-Host "
 Function Get-LegacyAuthSignins {
     param(
     
-        $applicationID,
+        $applicationID ,
         $AccessSecret,
         $daysBack
     )
     #credit to "www.lab365.in"
     
-    $authtype = "AutoDiscover","Exchange ActiveSync","Exchange Online PowerShell","Exchange Web Services","IMAP4","MAPI Over HTTP","Offline Address Book","Other clients","Outlook Anywhere (RPC over HTTP)","POP3","Reporting Web Services"
+    $authtype = "Authenticated SMTP","AutoDiscover","Exchange ActiveSync","Exchange Online PowerShell","Exchange Web Services","IMAP4","MAPI Over HTTP","Offline Address Book","Other clients","Outlook Anywhere (RPC over HTTP)","POP3","Reporting Web Services"
     
-    $folderpath = "D:\LegacyAuth\LegacyAuthLogs-$(get-date -Format MM_dd_yyyy)"
+    $folderpath = ".\LegacyAuthLogs-$(get-date -Format MM_dd_yyyy)"
     
     $Output = @()
     foreach($dayback in 1..$daysback){
 
         foreach($app in $authtype){
-            #$dayback = 5
-            $clientapp = "all"
+
             $startdate = get-date (Get-Date -Hour 00 -Minute 00 -Second 01).AddDays(-$dayback) -Format yyyy-MM-dd
-            $enddate = get-date (Get-Date -Hour 11 -Minute 59 -Second 59).AddDays(-($dayback-1)) -Format yyyy-MM-dd
+            $enddate = get-date (Get-Date -Hour 23 -Minute 59 -Second 59).AddDays(-($dayback-1)) -Format yyyy-MM-dd
     
             $ConnectGraph = Connect-Graph -ApplicationID $applicationID -TenantDomainName $TenantDomainName -AccessSecret $AccessSecret
             $ExpirationTime =  (get-date).AddSeconds(($ConnectGraph.expires_in))
@@ -94,8 +95,8 @@ Function Get-LegacyAuthSignins {
                 Write-Host "Fetching the signin logs for $app" -ForegroundColor cyan
                 $Clientappq="clientAppUsed eq " + "'"  +  $app + "'"
                 $date = " and createdDateTime ge " + $startdate +  " and createdDateTime le  " + $enddate # 'YYYY-MM-DD'
-                $quaryFilter=$Clientappq + $date    # + $status
-                $apiUrl='https://graph.microsoft.com/beta/auditLogs/signIns?' + "`$filter=$quaryFilter"
+                $queryFilter=$Clientappq# + $date
+                $apiUrl='https://graph.microsoft.com/beta/auditLogs/signIns?' + "`$filter=$queryFilter"
                 
                 TRY   {
                     $Data=Invoke-RestMethod -Headers @{Authorization = "Bearer $accessToken"} -Uri $apiUrl -Method Get
@@ -113,7 +114,7 @@ Function Get-LegacyAuthSignins {
                 } CATCH {               
                        Write-Host "Failed to fetch the Sign-in logs, please review the error message below." -ForegroundColor Yellow
                       
-                       if (($error[0].ErrorDetails.message | ConvertFrom-Json).error.message -match "expired")
+                       if (($error[0].ErrorDetails.message | ConvertFrom-Json -ErrorAction SilentlyContinue).error.message -match "expired")
                             {
                              Write-Host "Token in psSession has expired,script will try renew the token please restart the script" -ForegroundColor Yellow
                              $Global:authResult=GetAuthorizationToken
@@ -122,7 +123,7 @@ Function Get-LegacyAuthSignins {
                              Write-Host "Please make sure the account " -NoNewline -ForegroundColor Yellow
                              Write-Host  $Office365Username -NoNewline -ForegroundColor Cyan
                              Write-Host  " has 'Report Reader' role rights." -ForegroundColor Yellow
-                             break 
+                             break
                             }
                 }
             } 
@@ -206,16 +207,14 @@ Function Get-LegacyAuthSignins {
     $output
 }
 
-   # $path = "D:\LegacyAuth\LegacyAuthLogs-rawData"
-
-Write-host "Getting Legacy Signins for $DaysBack, this could take a while"
+Write-host "Getting Legacy Signins for $DaysBack days, this could take a while"
 $Output = Get-LegacyAuthSignins -applicationID $ApplicationID -AccessSecret $AccessSecret -daysBack $DaysBack
 Write-host "Legacy Authentication Count: $($output.count)"
-$group = $Output | Group-Object userprincipalname
+$GroupByUser = $Output | Group-Object userprincipalname
 
 $progressCount = 0
 
-$UniqueEntries = $group | ForEach-Object {
+$UniqueEntries = $GroupByUser | ForEach-Object {
     $progressCount ++
     if(!($progressCount%100)){Write-host "Processing $progressCount of $($group.count)"}
     $upn = $_.name
@@ -227,7 +226,8 @@ $UniqueEntries = $group | ForEach-Object {
         operatingSystem = ($_.group.operatingSystem| sort-object -Unique ) -join ";"
         browser = ($_.group.browser |sort-object -Unique ) -join ";"
         ipAddress =  ($_.group.ipAddress | sort-object -Unique  ) -join ";"
-        MostRecentLegacyAuth = ($_.group.createdDateTime  | sort-object -Descending | select-object -First 1) 
+        MostRecentLegacyAuthAttempt = ($_.group.createdDateTime  | sort-object -Descending | select-object -First 1) 
+        SuccessfullAuthentication = if(($_.group.status) -contains 0){$True}else{$False}
     }
 
     $legacyUserObject
