@@ -1,4 +1,5 @@
 #complain to: Mac Edwards
+#Create an Azure App with AuditLog.Read.All permission.  Admin consent required. 
 #Requires -Modules ImportExcel
 
 #Install Excel Module Install-Module ImportExcel -Scope CurrentUser
