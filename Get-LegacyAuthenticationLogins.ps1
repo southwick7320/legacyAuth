@@ -9,7 +9,7 @@ param (
     $AccessSecret,
     $SPOUsername,
     $SPOPassword,
-    $UploadUrl =,
+    $UploadUrl,
     $DaysBack = 7,
     $UploadtoSPO,
     $UploadFilePath 
